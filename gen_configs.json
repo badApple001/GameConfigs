@@ -1,0 +1,24 @@
+{
+    "_readme": {
+        "namespace": "生成的C#类的作用域",
+        "schemasClassName": "总配置表类名",
+        "classSuffix": "每张表类名的后缀(表名取自xlsx文件名)",
+        "dataDir": "xlsx配置表所在目录(相对本脚本)",
+        "csharpOutDir": "生成的C#代码输出目录(相对本脚本)",
+        "bytesOutDir": "生成的bytes数据输出目录(相对本脚本)",
+        "bytesDirName": "C#默认加载时使用的bytes目录名(StreamingAssets下的目录名, Android需自定义BytesProvider)",
+        "bytesExtension": "bytes文件扩展名",
+        "multiSheet": "true=一个xlsx的每个sheet生成一张表(多sheet时表名=文件名_sheet名), false=只取第一个sheet",
+        "skipSheetPrefix": "sheet名以此前缀开头则跳过"
+    },
+    "namespace": "MyFrameworks.DataConfig",
+    "schemasClassName": "GameSchemas",
+    "classSuffix": "Config",
+    "dataDir": "Data",
+    "csharpOutDir": "../Assets/GameScripts/Generated/DataConfig",
+    "bytesOutDir": "../Assets/GameArt/GameConfigBytes",
+    "bytesDirName": "GameConfigBytes",
+    "bytesExtension": ".bytes",
+    "multiSheet": true,
+    "skipSheetPrefix": "#"
+}
