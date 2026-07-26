@@ -5,10 +5,14 @@
       "Bash(cd \"e:/Workspace/MonoGames/SuperFunGames/GameConfigs\" && mkdir -p _verify_tmp && cd _verify_tmp && dotnet new console --framework net9.0 -o . 2>&1 | tail -1 && cp ../../Assets/GameScripts/Generated/DataConfig/*.g.cs .)",
       "Bash(dotnet run *)",
       "Bash(rm -f Data/_EnumTest.xlsx)",
-      "Bash(rm -rf _verify_tmp)"
+      "Bash(rm -rf _verify_tmp)",
+      "Bash(mkdir -p _verify_tmp)",
+      "Bash(dotnet new *)",
+      "Bash(echo \"exit=$?\")"
     ],
     "additionalDirectories": [
-      "E:\\Workspace\\MonoGames\\Assets\\GameScripts\\Generated\\DataConfig"
+      "E:\\Workspace\\MonoGames\\Assets\\GameScripts\\Generated\\DataConfig",
+      "C:\\Users\\Administrator\\.claude\\projects\\e--Workspace-MonoGames\\memory"
     ]
   }
 }

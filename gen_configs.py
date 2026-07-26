@@ -397,7 +397,7 @@ def collect_tables(cfg):
                 base = sanitize_class_name(fp.stem)
                 if len(sheets) > 1:
                     base += "_" + sanitize_class_name(ws.title)
-                table_name = base + cfg["classSuffix"]
+                table_name = base if base.endswith(cfg["classSuffix"]) else base + cfg["classSuffix"]
                 if table_name in used_names:
                     raise GenError(f"表名冲突: {table_name} ({fp.name} 与 {used_names[table_name]})")
                 t = parse_sheet(ws, table_name, fp.name, enums)
@@ -514,6 +514,15 @@ def camel(s):
     return s[:1].lower() + s[1:]
 
 
+def derive_editor_bytes_dir(cfg):
+    """从bytesOutDir推导Unity工程内Assets路径(供编辑器AssetDatabase加载)"""
+    parts = Path(cfg["bytesOutDir"]).parts
+    if "Assets" in parts:
+        return "/".join(parts[parts.index("Assets"):])
+    print(f"  [警告] 无法从 bytesOutDir({cfg['bytesOutDir']}) 推导Assets路径, 编辑器加载路径回退为 Assets/GameArt/GameConfigBytes")
+    return "Assets/GameArt/GameConfigBytes"
+
+
 def gen_schemas_cs(tables, ns, cls_name, cfg):
     sb = [CS_HEADER + "\n"]
     sb.append("using System;\nusing System.Collections.Generic;\nusing System.IO;\n\n")
@@ -580,6 +589,39 @@ def gen_schemas_cs(tables, ns, cls_name, cfg):
     sb.append("#endif\n")
     sb.append("            return File.ReadAllBytes(path);\n")
     sb.append("        }\n")
+
+    # Editor 访问入口(仅UNITY_EDITOR, 走AssetDatabase, 不污染运行时)
+    editor_dir = derive_editor_bytes_dir(cfg)
+    example = tables[0]["name"] if tables else "XXXConfig"
+    sb.append("\n#if UNITY_EDITOR\n")
+    sb.append("        /// <summary>\n")
+    sb.append("        /// 编辑器环境访问入口: 免进入运行模式直接读配置(首次访问自动走AssetDatabase加载)。\n")
+    sb.append(f"        /// 用法: GameSchemas.Editor.{example}_0(1000) — 仅UNITY_EDITOR下可用, 打包时会被完全剔除。\n")
+    sb.append("        /// </summary>\n")
+    sb.append("        public static class Editor\n        {\n")
+    sb.append(f"            /// <summary>编辑器下bytes资源目录(AssetDatabase寻址)</summary>\n")
+    sb.append(f"            public const string EditorBytesDir = \"{editor_dir}\";\n\n")
+    sb.append("            private static void EnsureLoaded()\n            {\n")
+    sb.append("                if (IsLoaded) return;\n")
+    sb.append("                BytesProvider = LoadBytesByAssetDatabase;\n")
+    sb.append("                Load();\n")
+    sb.append("            }\n\n")
+    sb.append("            private static byte[] LoadBytesByAssetDatabase(string tableName)\n            {\n")
+    sb.append("                string path = EditorBytesDir + \"/\" + tableName + BytesExtension;\n")
+    sb.append("                var asset = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.TextAsset>(path);\n")
+    sb.append("                if (asset == null) throw new FileNotFoundException(\"配置表资源不存在: \" + path + \" (是否已执行读表?)\");\n")
+    sb.append("                return asset.bytes;\n")
+    sb.append("            }\n\n")
+    for t in tables:
+        n = t["name"]
+        sb.append(xml_comment(f"{t['title']} - 按下标获取(编辑器)", 12))
+        sb.append(f"            public static {n} {n}(int index) {{ EnsureLoaded(); return GameSchemas.{n}(index); }}\n\n")
+        sb.append(xml_comment(f"{t['title']} - 按ID获取(编辑器)", 12))
+        sb.append(f"            public static {n} {n}_0(int id) {{ EnsureLoaded(); return GameSchemas.{n}_0(id); }}\n\n")
+        sb.append(xml_comment(f"{t['title']} - 行数(编辑器)", 12))
+        sb.append(f"            public static int {n}_nums() {{ EnsureLoaded(); return GameSchemas.{n}_nums(); }}\n\n")
+    sb.append("        }\n")
+    sb.append("#endif\n")
     sb.append("    }\n}\n")
     return "".join(sb)
 

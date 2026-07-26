@@ -69,7 +69,7 @@ python gen_configs.py
 - ID 重复时导表会打印警告，映射保留先出现的行
 - 类型解析失败会报出具体位置（文件/表/行/字段）并中止
 - `~$` 开头的 Excel 临时文件自动跳过；`#` 开头的 sheet 自动跳过
-- 一个 xlsx 含多个 sheet 时，每个 sheet 生成一张表，表名 = `文件名_sheet名 + Config`
+- 一个 xlsx 含多个 sheet 时，每个 sheet 生成一张表，表名 = `文件名_sheet名 + Config`（文件名已含 `Config` 后缀则不重复追加）
 
 ### 枚举类型
 
@@ -176,6 +176,23 @@ private static byte[] LoadBytesByYooAsset( string tableName )
 ```
 
 `LoadAll` 在 `FunGame.Launch`（YooAsset 初始化完成后）调用，业务代码直接用 `GameSchemas.XXXConfig_0(id)` 即可，无需关心加载。
+
+### 编辑器环境访问（免运行）
+
+编辑器脚本（如多语言工具、自定义检视面板）不进入 Play 模式也能读配置，走 `Editor` 嵌套入口，API 与运行时一致：
+
+```csharp
+var item = GameSchemas.Editor.ItemDefConfig_0(100000);   // 按ID
+var row  = GameSchemas.Editor.LevelTableConfig(0);       // 按下标
+int n    = GameSchemas.Editor.MiscConfig_nums();         // 行数
+```
+
+- 首次访问自动用 `AssetDatabase.LoadAssetAtPath<TextAsset>` 从 `Assets/GameArt/GameConfigBytes/` 加载全部表（无需先设 `BytesProvider`，无需 Play 模式）
+- 加载目录常量：`GameSchemas.Editor.EditorBytesDir`（由 `bytesOutDir` 自动推导生成）
+- 整个 `Editor` 类包在 `#if UNITY_EDITOR` 内，**打包时完全剔除，不污染运行时代码**
+- 编辑器下改过表并重新导表后，若需重新读取，重进 Play 或重编译触发重新加载即可（静态数据进程内只加载一次）
+
+> 注意：`Editor` 入口仅供编辑器代码使用，运行时业务请用 `GameSchemas.XXXConfig_0(id)`（由 `ConfigService` 走 YooAsset 加载）。
 
 ## 常见问题
 
