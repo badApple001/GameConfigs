@@ -8,7 +8,9 @@ Excel 配置表导表工具
 xlsx 格式约定:
     第1行: 表注释名 (取A1; A1为#或空时取第一个有效列的第1行), 仅用于类注释
     第2行: 字段名   (为空或以#开头 => 该列忽略, 仅策划使用)
-    第3行: 字段类型 (int/long/float/double/bool/string 及对应数组 int[] 等)
+    第3行: 字段类型 (int/long/float/double/bool/string 及对应数组 int[] 等;
+           enum_开头为枚举, 如 enum_ItemCategory => 生成枚举 ItemCategory,
+           枚举值收集该列出现过的所有字符串, 按首次出现顺序从0开始编号)
     第4行: 字段注释 (用于字段的<summary>)
     第5行起: 数据   (忽略列不导出; 第一个有效列必须为int, 作为ID映射)
 
@@ -76,6 +78,9 @@ CS_KEYWORDS = {
 }
 
 ARRAY_SPLIT_RE = re.compile(r"[,;|]")
+
+# 枚举类型前缀: enum_ItemCategory => C#枚举 ItemCategory
+ENUM_PREFIX = "enum_"
 
 
 class GenError(Exception):
@@ -187,8 +192,61 @@ def convert_scalar(v, type_name, where):
     raise GenError(f"{where}: 未知类型 {type_name}")
 
 
-def convert_array(v, elem_type, where):
-    """数组单元格: 支持 , ; | 分隔; 空 => []; 单个数值 => 单元素数组"""
+def parse_type(tname, ctx, fname):
+    """解析类型文本 => (是否数组, 种类base/enum, 基础类型名或枚举名)"""
+    array = tname.endswith("[]")
+    base = tname[:-2] if array else tname
+    if base.startswith(ENUM_PREFIX):
+        raw = base[len(ENUM_PREFIX):].strip()
+        if not raw:
+            raise GenError(f"{ctx}: 字段 {fname} 的枚举类型缺少名称({tname})")
+        return array, "enum", sanitize_class_name(raw)
+    if base in TYPE_MAP:
+        return array, "base", base
+    raise GenError(f"{ctx}: 字段 {fname} 未知类型 {tname}")
+
+
+def get_enum_def(enums, enum_name, comment, used_by):
+    """注册枚举使用处; 同名枚举(跨列/跨表)共享一份定义, 值列表做并集"""
+    edef = enums.get(enum_name)
+    if edef is None:
+        edef = {"name": enum_name, "comment": comment, "values": [], "index": {}, "members": {}, "used_by": []}
+        enums[enum_name] = edef
+    edef["used_by"].append(used_by)
+    return edef
+
+
+def convert_enum(v, edef, where):
+    """枚举单元格 => 值下标; 新字符串按首次出现顺序追加编号; 空 => 0"""
+    if v is None or (isinstance(v, str) and v.strip() == ""):
+        return 0
+    s = to_str(v).strip()
+    if s == "":
+        return 0
+    idx = edef["index"].get(s)
+    if idx is None:
+        member = sanitize_field_name(s)
+        prev = edef["members"].get(member)
+        if prev is not None and prev != s:
+            raise GenError(f"{where}: 枚举 {edef['name']} 的值 {s!r} 与 {prev!r} 生成了相同的C#成员名 {member}")
+        idx = len(edef["values"])
+        edef["values"].append(s)
+        edef["index"][s] = idx
+        edef["members"][member] = s
+    return idx
+
+
+def convert_value(v, field, where, enums):
+    """单个值转换(标量或数组元素)"""
+    if field["kind"] == "enum":
+        return convert_enum(v, enums[field["base"]], where)
+    return convert_scalar(v, field["base"], where)
+
+
+def convert_field(v, field, where, enums):
+    """字段值转换: 数组按 , ; | 分隔; 空 => []; 单个数值 => 单元素数组"""
+    if not field["array"]:
+        return convert_value(v, field, where, enums)
     if v is None or (isinstance(v, str) and v.strip() == ""):
         return []
     if isinstance(v, str):
@@ -196,7 +254,7 @@ def convert_array(v, elem_type, where):
         items = [s for s in items if s != ""]
     else:
         items = [v]  # 单个数值视为单元素
-    return [convert_scalar(it, elem_type, where) for it in items]
+    return [convert_value(it, field, where, enums) for it in items]
 
 
 # ---------------------------------------------------------------- 二进制写入
@@ -217,13 +275,16 @@ def write_cs_string(buf: bytearray, s: str):
     buf.extend(data)
 
 
-def write_value(buf: bytearray, v, type_name):
-    if type_name == "string":
+def write_scalar(buf: bytearray, v, field):
+    """写入单个值(标量或数组元素); 枚举按int32写入值下标"""
+    if field["kind"] == "enum":
+        buf.extend(struct.pack("<i", v))
+    elif field["base"] == "string":
         write_cs_string(buf, v)
-    elif type_name == "bool":
+    elif field["base"] == "bool":
         buf.extend(struct.pack("<B", 1 if v else 0))
     else:
-        buf.extend(struct.pack(TYPE_MAP[type_name][2], v))
+        buf.extend(struct.pack(TYPE_MAP[field["base"]][2], v))
 
 
 def write_table_bytes(table, out_path: Path):
@@ -231,20 +292,18 @@ def write_table_bytes(table, out_path: Path):
     buf.extend(struct.pack("<i", len(table["rows"])))
     for row in table["rows"]:
         for field, v in zip(table["fields"], row):
-            t = field["type"]
-            if t.endswith("[]"):
-                elem = t[:-2]
+            if field["array"]:
                 buf.extend(struct.pack("<i", len(v)))
                 for item in v:
-                    write_value(buf, item, elem)
+                    write_scalar(buf, item, field)
             else:
-                write_value(buf, v, t)
+                write_scalar(buf, v, field)
     out_path.write_bytes(bytes(buf))
 
 
 # ---------------------------------------------------------------- 解析xlsx
 
-def parse_sheet(ws, table_name, file_name):
+def parse_sheet(ws, table_name, file_name, enums):
     rows = list(ws.iter_rows(values_only=True))
     if len(rows) < 4:
         return None  # 空sheet跳过
@@ -280,17 +339,20 @@ def parse_sheet(ws, table_name, file_name):
         tname = str(types[i]).strip() if i < len(types) and types[i] is not None else ""
         if not tname:
             raise GenError(f"{ctx}: 字段 {fname} 缺少类型(第3行)")
-        base = tname[:-2] if tname.endswith("[]") else tname
-        if base not in TYPE_MAP:
-            raise GenError(f"{ctx}: 字段 {fname} 未知类型 {tname}")
+        array, kind, base = parse_type(tname, ctx, fname)
         comment = ""
         if i < len(comments) and comments[i] is not None:
             comment = str(comments[i]).strip()
-        fields.append({"name": fname, "type": tname, "comment": comment or fname, "col": i})
+        field = {"name": fname, "type": tname, "array": array, "kind": kind,
+                 "base": base, "comment": comment or fname, "col": i}
+        if kind == "enum":
+            get_enum_def(enums, base, field["comment"], f"{table_name}.{fname}")
+        fields.append(field)
 
     # 第一个有效列必须为int
-    if fields[0]["type"] != "int":
-        raise GenError(f"{ctx}: 第一个有效列 {fields[0]['name']} 必须为int类型(作为ID), 当前为 {fields[0]['type']}")
+    f0 = fields[0]
+    if f0["kind"] != "base" or f0["base"] != "int" or f0["array"]:
+        raise GenError(f"{ctx}: 第一个有效列 {f0['name']} 必须为int类型(作为ID), 当前为 {f0['type']}")
 
     # 数据行
     data_rows = []
@@ -302,11 +364,7 @@ def parse_sheet(ws, table_name, file_name):
         out = []
         for field, v in zip(fields, vals):
             where = f"{ctx} 第{r_idx}行[{field['name']}]"
-            t = field["type"]
-            if t.endswith("[]"):
-                out.append(convert_array(v, t[:-2], where))
-            else:
-                out.append(convert_scalar(v, t, where))
+            out.append(convert_field(v, field, where, enums))
         row_id = out[0]
         if row_id in id_seen:
             print(f"  [警告] {ctx}: ID {row_id} 重复(第{id_seen[row_id]}行与第{r_idx}行), 映射将保留先出现的行")
@@ -327,6 +385,7 @@ def collect_tables(cfg):
         raise GenError(f"{data_dir} 下没有找到任何 .xlsx 文件")
 
     tables = []
+    enums = {}  # 枚举注册表: 枚举名 -> 定义(值列表按首次出现顺序)
     used_names = {}
     for fp in xlsx_files:
         wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
@@ -341,7 +400,7 @@ def collect_tables(cfg):
                 table_name = base + cfg["classSuffix"]
                 if table_name in used_names:
                     raise GenError(f"表名冲突: {table_name} ({fp.name} 与 {used_names[table_name]})")
-                t = parse_sheet(ws, table_name, fp.name)
+                t = parse_sheet(ws, table_name, fp.name, enums)
                 if t is None:
                     print(f"  [跳过] {fp.name} -> {ws.title} (无有效内容)")
                     continue
@@ -349,7 +408,12 @@ def collect_tables(cfg):
                 tables.append(t)
         finally:
             wb.close()
-    return tables
+    for edef in enums.values():
+        if not edef["values"]:
+            print(f"  [警告] 枚举 {edef['name']} 没有收集到任何值(列全为空)")
+        if len(edef["used_by"]) > 1:
+            print(f"  [提示] 枚举 {edef['name']} 被多处使用, 值列表已合并: {', '.join(edef['used_by'])}")
+    return tables, enums
 
 
 # ---------------------------------------------------------------- C# 代码生成
@@ -362,9 +426,22 @@ def xml_comment(text, indent):
     return f"{pad}/// <summary>\n{pad}/// {text}\n{pad}/// </summary>\n"
 
 
+def cs_field_type(field):
+    """字段的C#类型名"""
+    t = field["base"] if field["kind"] == "enum" else TYPE_MAP[field["base"]][0]
+    return t + "[]" if field["array"] else t
+
+
+def cs_read_expr(field):
+    """从BinaryReader读取单个值(标量或数组元素)的表达式"""
+    if field["kind"] == "enum":
+        return f"({field['base']})reader.ReadInt32()"
+    return f"reader.{TYPE_MAP[field['base']][1]}()"
+
+
 def gen_table_cs(table, ns):
     fields = table["fields"]
-    has_array = any(f["type"].endswith("[]") for f in fields)
+    has_array = any(f["array"] for f in fields)
     id_field = fields[0]["name"]
 
     sb = [CS_HEADER + f" 源表: {table['source']}\n"]
@@ -373,28 +450,44 @@ def gen_table_cs(table, ns):
     sb.append(xml_comment(table["title"], 4))
     sb.append(f"    public class {table['name']} : IConfigRow\n    {{\n")
     for f in fields:
-        cs_type = TYPE_MAP[f["type"][:-2]][0] + "[]" if f["type"].endswith("[]") else TYPE_MAP[f["type"]][0]
         sb.append(xml_comment(f["comment"], 8))
-        sb.append(f"        public {cs_type} {f['name']};\n")
+        sb.append(f"        public {cs_field_type(f)} {f['name']};\n")
     sb.append(f"\n        public int Id => {id_field};\n")
     # Read
     sb.append("\n        public void Read(BinaryReader reader)\n        {\n")
     if has_array:
         sb.append("            int __c;\n")
     for f in fields:
-        t = f["type"]
         name = f["name"]
-        if t.endswith("[]"):
-            elem = t[:-2]
-            reader_fn = TYPE_MAP[elem][1]
-            cs_elem = TYPE_MAP[elem][0]
+        if f["array"]:
             sb.append(f"            __c = reader.ReadInt32();\n")
-            sb.append(f"            {name} = new {cs_elem}[__c];\n")
-            sb.append(f"            for (int __i = 0; __i < __c; __i++) {name}[__i] = reader.{reader_fn}();\n")
+            sb.append(f"            {name} = new {cs_field_type(f)[:-2]}[__c];\n")
+            sb.append(f"            for (int __i = 0; __i < __c; __i++) {name}[__i] = {cs_read_expr(f)};\n")
         else:
-            sb.append(f"            {name} = reader.{TYPE_MAP[t][1]}();\n")
+            sb.append(f"            {name} = {cs_read_expr(f)};\n")
     sb.append("        }\n")
     sb.append("    }\n}\n")
+    return "".join(sb)
+
+
+def gen_enums_cs(enums, ns):
+    """所有表收集到的枚举定义汇总"""
+    sb = [CS_HEADER + "\n"]
+    sb.append(f"namespace {ns}\n{{\n")
+    first = True
+    for edef in enums.values():
+        if not first:
+            sb.append("\n")
+        first = False
+        sb.append(xml_comment(edef["comment"], 4))
+        sb.append(f"    public enum {edef['name']}\n    {{\n")
+        for i, raw in enumerate(edef["values"]):
+            member = sanitize_field_name(raw)
+            if member != raw:
+                sb.append(xml_comment(f"原始文本: {raw}", 8))
+            sb.append(f"        {member} = {i},\n")
+        sb.append("    }\n")
+    sb.append("}\n")
     return "".join(sb)
 
 
@@ -507,7 +600,7 @@ def main():
     cfg.update({k: v for k, v in json.loads(CONFIG_PATH.read_text(encoding="utf-8")).items() if not k.startswith("_")})
 
     print(f"[1/3] 扫描 {cfg['dataDir']} ...")
-    tables = collect_tables(cfg)
+    tables, enums = collect_tables(cfg)
     if not tables:
         raise GenError("没有解析出任何配置表")
 
@@ -523,6 +616,10 @@ def main():
     (cs_dir / "ConfigBase.g.cs").write_text(gen_base_cs(ns), encoding="utf-8-sig")
     (cs_dir / f"{cfg['schemasClassName']}.g.cs").write_text(
         gen_schemas_cs(tables, ns, cfg["schemasClassName"], cfg), encoding="utf-8-sig")
+    if enums:
+        (cs_dir / "ConfigEnums.g.cs").write_text(gen_enums_cs(enums, ns), encoding="utf-8-sig")
+        for name, edef in enums.items():
+            print(f"  √ 枚举 {name:<20} {len(edef['values'])} 个值: {', '.join(edef['values'])}")
     for t in tables:
         (cs_dir / f"{t['name']}.g.cs").write_text(gen_table_cs(t, ns), encoding="utf-8-sig")
 

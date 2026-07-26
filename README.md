@@ -61,14 +61,54 @@ python gen_configs.py
 
 - **第一个有效列（忽略列不算）必须为 `int`**，作为 ID 建立映射
 - 支持的类型：`int` `long` `float` `double` `bool` `string` 及对应数组 `int[]` `float[]` 等
+- **枚举类型**：类型写 `enum_枚举名`（如 `enum_ItemCategory`），详见下方「枚举类型」
 - **数组单元格**：用 `,` `;` `|` 分隔均可（如 `1,2,3`、`0.5|1.5`）；单个数值视为单元素数组
-- **空单元格**：数值 → 0，bool → false，string → `""`，数组 → 空数组
+- **空单元格**：数值 → 0，bool → false，string → `""`，数组 → 空数组，枚举 → 第一个值(0)
 - **bool 单元格** 接受：`true/false/yes/no/y/n/1/0`（大小写不限）
 - **公式单元格**取缓存值，请先在 Excel 中保存
 - ID 重复时导表会打印警告，映射保留先出现的行
 - 类型解析失败会报出具体位置（文件/表/行/字段）并中止
 - `~$` 开头的 Excel 临时文件自动跳过；`#` 开头的 sheet 自动跳过
 - 一个 xlsx 含多个 sheet 时，每个 sheet 生成一张表，表名 = `文件名_sheet名 + Config`
+
+### 枚举类型
+
+第 3 行类型写 `enum_枚举名`（`enum_` 前缀会被移除），脚本自动收集该列出现过的所有字符串，**按首次出现顺序从 0 开始编号**，在 `ConfigEnums.g.cs` 中生成枚举定义：
+
+| ID | Category |
+|---|---|
+| int | enum_ItemCategory |
+| 资源ID | 资源分类 |
+| 100000 | Resource |
+| 200000 | Tool |
+| 300000 | Weapon |
+
+生成：
+
+```csharp
+public enum ItemCategory
+{
+    Resource = 0,
+    Tool = 1,
+    Weapon = 2,
+}
+```
+
+字段直接以枚举类型声明，使用侧：
+
+```csharp
+var item = GameSchemas.ItemDefConfig_0(300000);
+if (item.Category == ItemCategory.Weapon) { ... }
+```
+
+规则细节：
+
+- 枚举值就是 Excel 里的字符串，重复出现映射到同一个值
+- **同名枚举跨列/跨表使用时值列表自动合并**（并集，仍按首次出现顺序），导表时会打印提示
+- 也支持枚举数组：`enum_ItemCategory[]`，单元格写法同普通数组（`Weapon,Armor`）
+- 空单元格 → 0（即第一个枚举值）
+- 值文本会净化为合法 C# 标识符（如 `Magic Staff` → 成员 `Magic_Staff`，注释保留原始文本）
+- 枚举在 bytes 中按 int32 存储值下标；**新增值会追加在末尾，不要删改已有值的顺序**（会影响已打包数据）
 
 ## gen_configs.json 配置项
 
