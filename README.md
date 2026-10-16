@@ -110,6 +110,29 @@ if (item.Category == ItemCategory.Weapon) { ... }
 - 值文本会净化为合法 C# 标识符（如 `Magic Staff` → 成员 `Magic_Staff`，注释保留原始文本）
 - 枚举在 bytes 中按 int32 存储值下标；**新增值会追加在末尾，不要删改已有值的顺序**（会影响已打包数据）
 
+### ID 常量类（SoundDefConfig 特殊处理）
+
+`SoundDefConfig` 表除常规导出外，还会用 `Location` 字段的资源路径生成 `AudioId` 静态类：**最后一级目录名 + 去掉扩展名的文件名作为常量名，ID 作为 `int` 值**。原始路径保留在成员注释中。
+
+`AudioId.g.cs` 单独生成在 `ConfigEnums.g.cs` 同级目录（`Assets/GameScripts/Generated/DataConfig/`），普通枚举仍写入 `ConfigEnums.g.cs`。
+
+如 `Location = Assets/GameArt/Battle/Sound/Bgm/bgm_battle.wav`、`ID = 100001`，生成：
+
+```csharp
+public static class AudioId
+{
+    /// <summary>
+    /// Assets/GameArt/Battle/Sound/Bgm/bgm_battle.wav
+    /// </summary>
+    public const int Bgm_bgm_battle = 100001;
+}
+```
+
+- `Location` 为空的行不生成常量
+- 生成相同 key 却映射到不同 ID 会报错中止；相同 key、相同 ID 自动去重
+- 该静态类不写入 bytes，只是路径到 ID 的常量映射，增删改安全
+- 特殊规则配置在 `gen_configs.py` 顶部的 `ID_CLASS_SPECS`
+
 ## gen_configs.json 配置项
 
 | 键 | 默认值（当前项目） | 说明 |

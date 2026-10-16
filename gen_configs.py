@@ -82,6 +82,13 @@ ARRAY_SPLIT_RE = re.compile(r"[,;|]")
 # 枚举类型前缀: enum_ItemCategory => C#枚举 ItemCategory
 ENUM_PREFIX = "enum_"
 
+# 特殊表: 由指定字段(资源路径)生成 ID 静态类, key=父目录名+文件名(去后缀), value=ID
+# 如 SoundDefConfig.Location = "Assets/GameArt/Battle/Sound/Bgm/bgm_battle.wav"
+#    => AudioId.Bgm_bgm_battle = 100001
+ID_CLASS_SPECS = {
+    "SoundDefConfig": { "field": "Location", "class": "AudioId" },
+}
+
 
 class GenError(Exception):
     """导表错误, 消息内需带表/行/列定位"""
@@ -375,6 +382,39 @@ def parse_sheet(ws, table_name, file_name, enums):
     return {"name": table_name, "title": title, "fields": fields, "rows": data_rows, "source": file_name}
 
 
+def build_id_classes(tables, enums):
+    """特殊表处理(ID_CLASS_SPECS): 用父目录名和文件名生成 key、ID 生成 value"""
+    for t in tables:
+        spec = ID_CLASS_SPECS.get(t["name"])
+        if not spec:
+            continue
+        ctx = f"{t['source']} -> {t['name']}"
+        fi = next((i for i, f in enumerate(t["fields"]) if f["name"] == spec["field"]), None)
+        if fi is None:
+            raise GenError(f"{ctx}: 找不到字段 {spec['field']}, 无法生成常量类 {spec['class']}")
+        edef = get_enum_def(enums, spec["class"], f"{t['name']} 资源路径ID常量", f"{t['name']}.{spec['field']}")
+        edef["explicit"] = {}     # 成员名 -> ID
+        edef["raw_comments"] = {} # 成员名 -> 原始路径(生成注释用)
+        for row in t["rows"]:
+            path = row[fi]
+            if path is None or str(path).strip() == "":
+                continue  # 无路径的行不进枚举
+            p = str(path).strip()
+            parts = re.split(r"[/\\]+", p)
+            stem = re.sub(r"\.[^./\\]+$", "", parts[-1])
+            parent = parts[-2] if len(parts) > 1 else ""
+            member = sanitize_field_name(f"{parent}_{stem}" if parent else stem)
+            row_id = row[0]
+            prev = edef["explicit"].get(member)
+            if prev is not None:
+                if prev != row_id:
+                    raise GenError(f"{ctx}: 常量类 {spec['class']} 成员 {member} 冲突(ID {prev} 与 {row_id}), 路径: {p}")
+                continue
+            edef["values"].append(member)
+            edef["explicit"][member] = row_id
+            edef["raw_comments"][member] = p
+
+
 def collect_tables(cfg):
     data_dir = (SCRIPT_DIR / cfg["dataDir"]).resolve()
     if not data_dir.is_dir():
@@ -471,11 +511,13 @@ def gen_table_cs(table, ns):
 
 
 def gen_enums_cs(enums, ns):
-    """所有表收集到的枚举定义汇总"""
+    """所有表收集到的普通枚举定义汇总"""
     sb = [CS_HEADER + "\n"]
     sb.append(f"namespace {ns}\n{{\n")
     first = True
     for edef in enums.values():
+        if "explicit" in edef:
+            continue
         if not first:
             sb.append("\n")
         first = False
@@ -488,6 +530,20 @@ def gen_enums_cs(enums, ns):
             sb.append(f"        {member} = {i},\n")
         sb.append("    }\n")
     sb.append("}\n")
+    return "".join(sb)
+
+
+def gen_id_class_cs(edef, ns):
+    sb = [CS_HEADER + "\n"]
+    sb.append(f"namespace {ns}\n{{\n")
+    sb.append(xml_comment(edef["comment"], 4))
+    sb.append(f"    public static class {edef['name']}\n    {{\n")
+    for member in edef["values"]:
+        comment = edef["raw_comments"].get(member)
+        if comment:
+            sb.append(xml_comment(comment, 8))
+        sb.append(f"        public const int {member} = {edef['explicit'][member]};\n")
+    sb.append("    }\n}\n")
     return "".join(sb)
 
 
@@ -645,6 +701,7 @@ def main():
     tables, enums = collect_tables(cfg)
     if not tables:
         raise GenError("没有解析出任何配置表")
+    build_id_classes(tables, enums)
 
     cs_dir = (SCRIPT_DIR / cfg["csharpOutDir"]).resolve()
     bytes_dir = (SCRIPT_DIR / cfg["bytesOutDir"]).resolve()
@@ -658,10 +715,14 @@ def main():
     (cs_dir / "ConfigBase.g.cs").write_text(gen_base_cs(ns), encoding="utf-8-sig")
     (cs_dir / f"{cfg['schemasClassName']}.g.cs").write_text(
         gen_schemas_cs(tables, ns, cfg["schemasClassName"], cfg), encoding="utf-8-sig")
-    if enums:
-        (cs_dir / "ConfigEnums.g.cs").write_text(gen_enums_cs(enums, ns), encoding="utf-8-sig")
-        for name, edef in enums.items():
-            print(f"  √ 枚举 {name:<20} {len(edef['values'])} 个值: {', '.join(edef['values'])}")
+    regular_enums = {name: edef for name, edef in enums.items() if "explicit" not in edef}
+    if regular_enums:
+        (cs_dir / "ConfigEnums.g.cs").write_text(gen_enums_cs(regular_enums, ns), encoding="utf-8-sig")
+    for name, edef in enums.items():
+        if "explicit" in edef:
+            (cs_dir / f"{name}.g.cs").write_text(gen_id_class_cs(edef, ns), encoding="utf-8-sig")
+        kind = "ID常量类" if "explicit" in edef else "枚举"
+        print(f"  √ {kind} {name:<20} {len(edef['values'])} 个值: {', '.join(edef['values'])}")
     for t in tables:
         (cs_dir / f"{t['name']}.g.cs").write_text(gen_table_cs(t, ns), encoding="utf-8-sig")
 
